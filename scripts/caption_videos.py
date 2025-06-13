@@ -176,25 +176,37 @@ def caption_media(
     with progress:
         task = progress.add_task("Generating captions", total=len(media_to_process))
 
-        for media_file in media_to_process:
+        # In your main processing loop, each "media_file" is now a small scene file
+        for media_file in media_to_process:  # These are now scene files, not full videos
             # Update progress description to show current file
             progress.update(task, description=f"Captioning [bold blue]{media_file.name}[/]")
 
             try:
+                # Add more detailed progress info
+                console.print(f"[bold cyan]Processing: {media_file.name}[/]")
+                console.print(f"[bold yellow]Extracting frames at {fps} FPS and generating caption...[/]")
+                
                 # Generate caption for the media
                 caption = captioner.caption(
-                    path=media_file,
+                    path=media_file,  # This is now a small scene file
                     fps=fps,
                     clean_caption=clean_caption,
                 )
+                
+                console.print(f"[bold green]✓ Generated caption for {media_file.name}[/]")
+                console.print(f"[bold dim]Caption preview: {caption[:100]}...[/]")
 
                 # Convert absolute path to relative path (relative to the output file's directory)
                 rel_path = str(media_file.resolve().relative_to(base_dir))
                 # Store the caption with the relative path as key
                 captions[rel_path] = caption
 
+                # 💾 Save after each scene (much more frequent saves)
+                _save_captions(captions, output_path, output_format)
+                console.print(f"[bold dim]💾 Saved progress ({len(captions)} scenes)[/]")
+                
             except Exception as e:
-                console.print(f"[bold red]Error captioning [bold blue]{media_file}[/]: {e}[/]")
+                console.print(f"[bold red]Error captioning scene {media_file}: {e}[/]")
 
             # Advance progress bar
             progress.advance(task)
@@ -396,61 +408,38 @@ def create_captioner_with_progress(
     """Create captioner with progress tracking for model loading."""
     
     console.print("[bold blue]Initializing captioning model...[/]")
+    console.print(f"[bold yellow]Device: {device}[/]")
+    console.print(f"[bold yellow]Model: {captioner_type}[/]")
+    console.print(f"[bold yellow]8-bit: {use_8bit}[/]")
     
-    # Enable transformers progress bars temporarily for download tracking
-    from transformers.utils.logging import enable_progress_bar
+    # Enable transformers progress bars (this shows the real progress you saw)
+    from transformers.utils.logging import enable_progress_bar, set_verbosity_info
     enable_progress_bar()
+    set_verbosity_info()
     
-    # Create a simple progress indicator for the loading phases
-    loading_phases = [
-        "Downloading tokenizer...",
-        "Downloading model weights...", 
-        "Loading model into memory...",
-        "Initializing vision processor...",
-        "Setting up inference pipeline...",
-    ]
-    
-    # Start the loading process with a manual progress tracker
     start_time = time.time()
     
-    with tqdm(total=len(loading_phases), desc="Model Loading", unit="phase", 
-              bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
-        
-        try:
-            pbar.set_description("Phase 1: Downloading tokenizer")
-            pbar.update(1)
-            time.sleep(0.5)  # Small delay to show progress
-            
-            pbar.set_description("Phase 2: Downloading model weights")  
-            pbar.update(1)
-            
-            # This is where the actual heavy lifting happens
-            pbar.set_description("Phase 3: Loading model into memory")
-            captioner = create_captioner(
-                captioner_type=captioner_type,
-                device=device,
-                use_8bit=use_8bit,
-                vlm_instruction=vlm_instruction,
-            )
-            pbar.update(1)
-            
-            pbar.set_description("Phase 4: Initializing vision processor")
-            pbar.update(1)
-            time.sleep(0.2)
-            
-            pbar.set_description("Phase 5: Setting up inference pipeline")
-            pbar.update(1)
-            time.sleep(0.2)
-            
-        except Exception as e:
-            pbar.close()
-            raise e
+    console.print("[bold cyan]Starting model download and loading...[/]")
+    console.print("[bold yellow]This may take several minutes on first run![/]")
     
-    # Disable progress bars again for cleaner output during captioning
+    try:
+        # This is where the real loading happens - no fake tqdm needed
+        captioner = create_captioner(
+            captioner_type=captioner_type,
+            device=device,
+            use_8bit=use_8bit,
+            vlm_instruction=vlm_instruction,
+        )
+        
+    except Exception as e:
+        console.print(f"[bold red]✗ Error creating captioner: {e}[/]")
+        raise e
+    
+    # Disable progress bars for cleaner captioning output
     disable_progress_bar()
     
     elapsed_time = time.time() - start_time
-    console.print(f"[bold green]✓[/] Model loaded successfully in {elapsed_time:.1f} seconds")
+    console.print(f"[bold green]✓ Model loaded successfully in {elapsed_time:.1f} seconds[/]")
     
     return captioner
 
@@ -612,3 +601,4 @@ Valid output formats: json, csv, txt, jsonl (determined by file extension)
 
 if __name__ == "__main__":
     main()
+

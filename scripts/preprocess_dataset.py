@@ -15,13 +15,13 @@ The dataset can be either:
 2. A CSV, JSON, or JSONL file with columns for captions and video paths
 """
 
+import argparse
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import torch
 import torchvision
-import typer
 from pydantic import BaseModel
 from rich.console import Console
 from rich.progress import (
@@ -46,11 +46,6 @@ from ltxv_trainer.model_loader import LtxvModelVersion, load_text_encoder, load_
 
 disable_progress_bar()
 console = Console()
-app = typer.Typer(
-    pretty_exceptions_enable=False,
-    help="Preprocess a video dataset by computing video clips latents and text captions embeddings. "
-    "The dataset can be either a directory with text files or a CSV/JSON/JSONL file.",
-)
 
 VAE_SPATIAL_FACTOR = 32
 VAE_TEMPORAL_FACTOR = 8
@@ -348,117 +343,157 @@ def _parse_resolution_buckets(resolution_buckets_str: str) -> list[tuple[int, in
     """Parse resolution buckets from string format to list of tuples"""
     resolution_buckets = []
     for bucket_str in resolution_buckets_str.split(";"):
-        w, h, f = map(int, bucket_str.split("x"))
+        try:
+            w, h, f = map(int, bucket_str.split("x"))
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"Invalid resolution bucket format: {bucket_str}. Expected format: WxHxF"
+            )
 
         if w % VAE_SPATIAL_FACTOR != 0 or h % VAE_SPATIAL_FACTOR != 0:
-            raise typer.BadParameter(
-                f"Width and height must be multiples of {VAE_SPATIAL_FACTOR}, got {w}x{h}",
-                param_hint="resolution-buckets",
+            raise argparse.ArgumentTypeError(
+                f"Width and height must be multiples of {VAE_SPATIAL_FACTOR}, got {w}x{h}"
             )
 
         if f % VAE_TEMPORAL_FACTOR != 1:
-            raise typer.BadParameter(
-                f"Number of frames must be a multiple of {VAE_TEMPORAL_FACTOR} plus 1, got {f}",
-                param_hint="resolution-buckets",
+            raise argparse.ArgumentTypeError(
+                f"Number of frames must be a multiple of {VAE_TEMPORAL_FACTOR} plus 1, got {f}"
             )
 
         resolution_buckets.append((f, h, w))
     return resolution_buckets
 
 
-@app.command()
-def main(  # noqa: PLR0913
-    dataset_path: str = typer.Argument(
-        ...,
+def main():
+    """Main function using argparse"""
+    parser = argparse.ArgumentParser(
+        description="Preprocess a video dataset by computing and saving latents and text embeddings. "
+        "The dataset can be either a directory with text files or a CSV/JSON/JSONL file.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s /path/to/dataset --resolution-buckets 768x768x25
+  %(prog)s dataset.csv --resolution-buckets 512x512x49 --batch-size 4
+        """,
+    )
+
+    # Positional argument
+    parser.add_argument(
+        "dataset_path",
         help="Path to dataset directory or metadata file (CSV/JSON/JSONL)",
-    ),
-    resolution_buckets: str = typer.Option(
-        ...,
+    )
+
+    # Required argument
+    parser.add_argument(
+        "--resolution-buckets",
+        type=_parse_resolution_buckets,
+        required=True,
         help='Resolution buckets in format "WxHxF;WxHxF;..." (e.g. "768x768x25;512x512x49")',
-    ),
-    caption_column: str = typer.Option(
+    )
+
+    # Optional arguments
+    parser.add_argument(
+        "--caption-column",
         default="caption",
         help="Column name or filename for captions: "
         "If dataset_path is a CSV/JSON/JSONL file, this is the column name containing captions. "
-        "If dataset_path is a directory, this is the filename containing line-separated captions.",
-    ),
-    video_column: str = typer.Option(
+        "If dataset_path is a directory, this is the filename containing line-separated captions. "
+        "(default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--video-column",
         default="media_path",
         help="Column name or filename for videos: "
         "If dataset_path is a CSV/JSON/JSONL file, this is the column name containing video paths. "
-        "If dataset_path is a directory, this is the filename containing line-separated video paths.",
-    ),
-    batch_size: int = typer.Option(
+        "If dataset_path is a directory, this is the filename containing line-separated video paths. "
+        "(default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
         default=1,
-        help="Batch size for preprocessing",
-    ),
-    num_workers: int = typer.Option(
+        help="Batch size for preprocessing (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--num-workers",
+        type=int,
         default=1,
-        help="Number of dataloader workers",
-    ),
-    device: str = typer.Option(
+        help="Number of dataloader workers (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--device",
         default="cuda",
-        help="Device to use for computation",
-    ),
-    load_text_encoder_in_8bit: bool = typer.Option(
-        default=False,
+        help="Device to use for computation (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--load-text-encoder-in-8bit",
+        action="store_true",
         help="Load the T5 text encoder in 8-bit precision to save memory",
-    ),
-    vae_tiling: bool = typer.Option(
-        default=False,
+    )
+
+    parser.add_argument(
+        "--vae-tiling",
+        action="store_true",
         help="Enable VAE tiling for larger video resolutions",
-    ),
-    output_dir: str | None = typer.Option(
-        default=None,
+    )
+
+    parser.add_argument(
+        "--output-dir",
         help="Output directory (defaults to .precomputed in dataset directory)",
-    ),
-    model_source: str = typer.Option(
+    )
+
+    parser.add_argument(
+        "--model-source",
         default=str(LtxvModelVersion.latest()),
-        help="Model source - can be a version string (e.g. 'LTXV_2B_0.9.5'), HF repo, or local path",
-    ),
-    id_token: str | None = typer.Option(
-        default=None,
+        help="Model source - can be a version string (e.g. 'LTXV_2B_0.9.5'), HF repo, or local path "
+        "(default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--id-token",
         help="Optional token to prepend to each caption (acts as a trigger word when training a LoRA)",
-    ),
-    decode_videos: bool = typer.Option(
-        default=False,
+    )
+
+    parser.add_argument(
+        "--decode-videos",
+        action="store_true",
         help="Decode and save videos after encoding (for verification purposes)",
-    ),
-) -> None:
-    """Preprocess a video dataset by computing and saving latents and text embeddings.
-
-    The dataset can be specified in two ways:
-    1. A directory containing text files with captions and video paths
-    2. A CSV, JSON, or JSONL file with columns for captions and video paths
-    """
-    parsed_resolution_buckets = _parse_resolution_buckets(resolution_buckets)
-
-    if len(parsed_resolution_buckets) > 1:
-        raise typer.BadParameter(
-            "Multiple resolution buckets are not yet supported. Please specify only one bucket.",
-            param_hint="resolution-buckets",
-        )
-
-    args = PreprocessingArgs(
-        dataset_path=dataset_path,
-        caption_column=caption_column,
-        video_column=video_column,
-        resolution_buckets=parsed_resolution_buckets,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        output_dir=output_dir,
-        id_token=id_token,
-        vae_tiling=vae_tiling,
-        decode_videos=decode_videos,
     )
 
+    args = parser.parse_args()
+
+    # Validate resolution buckets
+    if len(args.resolution_buckets) > 1:
+        parser.error("Multiple resolution buckets are not yet supported. Please specify only one bucket.")
+
+    # Create preprocessing args
+    preprocessing_args = PreprocessingArgs(
+        dataset_path=args.dataset_path,
+        caption_column=args.caption_column,
+        video_column=args.video_column,
+        resolution_buckets=args.resolution_buckets,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        output_dir=args.output_dir,
+        id_token=args.id_token,
+        vae_tiling=args.vae_tiling,
+        decode_videos=args.decode_videos,
+    )
+
+    # Create and run preprocessor
     preprocessor = DatasetPreprocessor(
-        model_source=model_source,
-        device=device,
-        load_text_encoder_in_8bit=load_text_encoder_in_8bit,
+        model_source=args.model_source,
+        device=args.device,
+        load_text_encoder_in_8bit=args.load_text_encoder_in_8bit,
     )
-    preprocessor.preprocess(args)
+    preprocessor.preprocess(preprocessing_args)
 
 
 if __name__ == "__main__":
-    app()
+    main()
+

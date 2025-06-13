@@ -22,12 +22,12 @@ optimization:
   learning_rate: 2e-4
   steps: 1500
   batch_size: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 8
   max_grad_norm: 1.0
   optimizer_type: "adamw" # Options: "adamw" or "adamw8bit"
   scheduler_type: "linear" # Options: "constant", "linear", "cosine", "cosine_with_restarts", "polynomial"
   scheduler_params: {}
-  enable_gradient_checkpointing: false
+  enable_gradient_checkpointing: true
   first_frame_conditioning_p: 0.1
 
 # Acceleration optimization
@@ -40,7 +40,7 @@ acceleration:
 
 # Data configuration
 data:
-  preprocessed_data_root: "/path/to/preprocessed/data"
+  preprocessed_data_root: "assets/scenes/.precomputed"
   num_dataloader_workers: 2
 
 # Validation configuration
@@ -50,10 +50,10 @@ validation:
     - "a video of a person wearing a nice suit"
   negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
   images: null # Set to a list of image paths to use first-frame conditioning, or null to disable
-  video_dims: [768, 448, 89] # [width, height, frames]
+  video_dims: [512, 384, 25] # [width, height, frames]
   seed: 42
   inference_steps: 50
-  interval: 100 # Set to null to disable validation
+  interval: 500 # Set to null to disable validation
   videos_per_prompt: 1
   guidance_scale: 3.5
 
