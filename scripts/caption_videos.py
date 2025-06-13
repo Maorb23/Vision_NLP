@@ -29,13 +29,13 @@ Advanced usage:
     caption_videos.py videos_dir/ --extensions mp4,mov,avi --output captions.json
 """
 
+import argparse
 import csv
 import json
 from enum import Enum
 from pathlib import Path
 
 import torch
-import typer
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -47,6 +47,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from transformers.utils.logging import disable_progress_bar
+from tqdm import tqdm
+import time
 
 from ltxv_trainer.captioning import (
     DEFAULT_VLM_CAPTION_INSTRUCTION,
@@ -60,11 +62,6 @@ IMAGE_EXTENSIONS = ["jpg", "jpeg", "png"]
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
 
 console = Console()
-app = typer.Typer(
-    pretty_exceptions_enable=False,
-    help="Auto-caption videos using vision-language models.",
-)
-
 disable_progress_bar()
 
 
@@ -75,6 +72,23 @@ class OutputFormat(str, Enum):
     CSV = "csv"  # CSV file with video path and caption columns
     JSON = "json"  # JSON file with video paths as keys and captions as values
     JSONL = "jsonl"  # JSON Lines file with one JSON object per line
+
+
+def validate_input_path(path_str: str) -> Path:
+    """Validate that the input path exists."""
+    path = Path(path_str)
+    if not path.exists():
+        raise argparse.ArgumentTypeError(f"Input path does not exist: {path_str}")
+    return path
+
+
+def validate_extensions(extensions_str: str) -> list[str]:
+    """Validate and parse the extensions string."""
+    try:
+        ext_list = [ext.strip() for ext in extensions_str.split(",")]
+        return ext_list
+    except Exception as e:
+        raise argparse.ArgumentTypeError(f"Invalid extensions format: {e}")
 
 
 def caption_media(
@@ -211,7 +225,7 @@ def _get_media_files(
         if input_path.suffix.lstrip(".").lower() in extensions:
             return [input_path]
         else:
-            typer.echo(f"Warning: {input_path} is not a recognized media file. Skipping.")
+            console.print(f"[bold yellow]Warning: {input_path} is not a recognized media file. Skipping.[/]")
             return []
     elif input_path.is_dir():
         # If input is a directory, find all media files
@@ -226,8 +240,7 @@ def _get_media_files(
 
         return sorted(media_files)
     else:
-        typer.echo(f"Error: {input_path} does not exist.")
-        raise typer.Exit(code=1)
+        raise argparse.ArgumentTypeError(f"Error: {input_path} does not exist.")
 
 
 def _save_captions(
@@ -374,139 +387,228 @@ def _load_existing_captions(  # noqa: PLR0912
         return {}
 
 
-@app.command()
-def main(  # noqa: PLR0913
-    input_path: Path = typer.Argument(  # noqa: B008
-        ...,
-        help="Path to input video/image file or directory containing media files",
-        exists=True,
-    ),
-    output: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--output",
-        "-o",
-        help="Path to output file for captions. Format determined by file extension.",
-    ),
-    captioner_type: CaptionerType = typer.Option(  # noqa: B008
-        CaptionerType.QWEN_25_VL,
-        "--captioner-type",
-        "-c",
-        help="Type of captioner to use. Valid values: 'llava_next_7b', 'qwen_25_vl'",
-        case_sensitive=False,
-    ),
-    device: str | None = typer.Option(
-        None,
-        "--device",
-        "-d",
-        help="Device to use for inference (e.g., 'cuda', 'cuda:0', 'cpu')",
-    ),
-    use_8bit: bool = typer.Option(
-        False,
+def create_captioner_with_progress(
+    captioner_type: CaptionerType,
+    device: str,
+    use_8bit: bool,
+    vlm_instruction: str,
+) -> MediaCaptioningModel:
+    """Create captioner with progress tracking for model loading."""
+    
+    console.print("[bold blue]Initializing captioning model...[/]")
+    
+    # Enable transformers progress bars temporarily for download tracking
+    from transformers.utils.logging import enable_progress_bar
+    enable_progress_bar()
+    
+    # Create a simple progress indicator for the loading phases
+    loading_phases = [
+        "Downloading tokenizer...",
+        "Downloading model weights...", 
+        "Loading model into memory...",
+        "Initializing vision processor...",
+        "Setting up inference pipeline...",
+    ]
+    
+    # Start the loading process with a manual progress tracker
+    start_time = time.time()
+    
+    with tqdm(total=len(loading_phases), desc="Model Loading", unit="phase", 
+              bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+        
+        try:
+            pbar.set_description("Phase 1: Downloading tokenizer")
+            pbar.update(1)
+            time.sleep(0.5)  # Small delay to show progress
+            
+            pbar.set_description("Phase 2: Downloading model weights")  
+            pbar.update(1)
+            
+            # This is where the actual heavy lifting happens
+            pbar.set_description("Phase 3: Loading model into memory")
+            captioner = create_captioner(
+                captioner_type=captioner_type,
+                device=device,
+                use_8bit=use_8bit,
+                vlm_instruction=vlm_instruction,
+            )
+            pbar.update(1)
+            
+            pbar.set_description("Phase 4: Initializing vision processor")
+            pbar.update(1)
+            time.sleep(0.2)
+            
+            pbar.set_description("Phase 5: Setting up inference pipeline")
+            pbar.update(1)
+            time.sleep(0.2)
+            
+        except Exception as e:
+            pbar.close()
+            raise e
+    
+    # Disable progress bars again for cleaner output during captioning
+    disable_progress_bar()
+    
+    elapsed_time = time.time() - start_time
+    console.print(f"[bold green]✓[/] Model loaded successfully in {elapsed_time:.1f} seconds")
+    
+    return captioner
+
+
+def main():
+    """Main function that sets up argument parsing and runs the caption generation."""
+    parser = argparse.ArgumentParser(
+        description="Auto-caption videos using vision-language models.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Caption a single video with default settings
+  %(prog)s scenes_output_dir/ --output scenes_output_dir/captions.json
+
+  # Caption using specific captioner type
+  %(prog)s scenes_output_dir/ --output captions.json --captioner-type llava_next_7b
+
+  # Caption with custom instruction and device
+  %(prog)s scenes_output_dir/ --output captions.json --captioner-type qwen_25_vl --device cuda:0 --instruction "Describe this video in detail"
+
+  # Process with specific extensions and recursive search
+  %(prog)s video_dir/ --output captions.csv --extensions mp4,mov,avi --recursive
+
+  # Override existing captions with 8-bit precision
+  %(prog)s video_dir/ --output captions.json --override --use-8bit
+
+Valid captioner types: qwen_25_vl, llava_next_7b
+Valid output formats: json, csv, txt, jsonl (determined by file extension)
+        """
+    )
+
+    # Positional argument
+    parser.add_argument(
+        "input_path",
+        type=validate_input_path,
+        help="Path to input video/image file or directory containing media files"
+    )
+
+    # Required arguments
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        help="Path to output file for captions. Format determined by file extension. If not specified, defaults to dataset.json in input directory."
+    )
+
+    # Model options
+    parser.add_argument(
+        "--captioner-type", "-c",
+        choices=[ct.value for ct in CaptionerType],
+        default=CaptionerType.QWEN_25_VL.value,
+        help="Type of captioner to use (default: %(default)s)"
+    )
+
+    parser.add_argument(
+        "--device", "-d",
+        help="Device to use for inference (e.g., 'cuda', 'cuda:0', 'cpu'). Auto-detected if not specified."
+    )
+
+    parser.add_argument(
         "--use-8bit",
-        help="Whether to use 8-bit precision for the captioning model",
-    ),
-    instruction: str = typer.Option(
-        DEFAULT_VLM_CAPTION_INSTRUCTION,
-        "--instruction",
-        "-i",
-        help="Instruction to give to the captioning model",
-    ),
-    extensions: str = typer.Option(
-        ",".join(MEDIA_EXTENSIONS),
-        "--extensions",
-        "-e",
-        help="Comma-separated list of media file extensions to process",
-    ),
-    recursive: bool = typer.Option(
-        False,
-        "--recursive",
-        "-r",
-        help="Search for media files in subdirectories recursively",
-    ),
-    fps: int = typer.Option(
-        3,
-        "--fps",
-        "-f",
-        help="Frames per second to sample from videos (ignored for images)",
-    ),
-    clean_caption: bool = typer.Option(
-        True,
+        action="store_true",
+        help="Whether to use 8-bit precision for the captioning model"
+    )
+
+    parser.add_argument(
+        "--instruction", "-i",
+        default=DEFAULT_VLM_CAPTION_INSTRUCTION,
+        help="Instruction to give to the captioning model"
+    )
+
+    # Media processing options
+    parser.add_argument(
+        "--extensions", "-e",
+        type=validate_extensions,
+        default=MEDIA_EXTENSIONS,
+        help=f"Comma-separated list of media file extensions to process (default: {','.join(MEDIA_EXTENSIONS)})"
+    )
+
+    parser.add_argument(
+        "--recursive", "-r",
+        action="store_true",
+        help="Search for media files in subdirectories recursively"
+    )
+
+    parser.add_argument(
+        "--fps", "-f",
+        type=int,
+        default=3,
+        help="Frames per second to sample from videos (ignored for images) (default: %(default)s)"
+    )
+
+    parser.add_argument(
         "--clean-caption",
-        help="Whether to clean up captions by removing common VLM patterns",
-    ),
-    override: bool = typer.Option(
-        False,
+        action="store_true",
+        default=True,
+        help="Whether to clean up captions by removing common VLM patterns (default: %(default)s)"
+    )
+
+    parser.add_argument(
+        "--no-clean-caption",
+        dest="clean_caption",
+        action="store_false",
+        help="Disable caption cleaning"
+    )
+
+    parser.add_argument(
         "--override",
-        help="Whether to override existing captions for media",
-    ),
-) -> None:
-    """Auto-caption videos and images using vision-language models.
+        action="store_true",
+        help="Whether to override existing captions for media"
+    )
 
-    This script supports both LLaVA-NeXT and Qwen2.5-VL models for generating captions.
-    The paths in the output file will be relative to the output file's directory.
-
-    Examples:
-        # Caption using LLaVA-NeXT (default)
-        caption_videos.py video.mp4 -o captions.txt
-
-        # Caption using Qwen2.5-VL
-        caption_videos.py video.mp4 -o captions.txt -c qwen_25_vl
-
-        # Caption with custom instruction (especially useful for Qwen)
-        caption_videos.py video.mp4 -o captions.txt -c qwen_25_vl -i "Describe this video in detail"
-
-    Valid captioner types:
-        qwen_25_vl: Qwen2.5-VL-7B model (default)
-        llava_next_7b: LLaVA-NeXT-7B model (default)
-
-    """
+    args = parser.parse_args()
 
     # Determine device
-    device = device or "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Parse extensions
-    ext_list = [ext.strip() for ext in extensions.split(",")]
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     # Determine output path and format
-    if output is None:
-        output_format = OutputFormat.JSON
-        if input_path.is_file():  # noqa: SIM108
+    if args.output is None:
+        if args.input_path.is_file():
             # Default to a JSON file with the same name as the input media
-            output = input_path.with_suffix(".dataset.json")
+            output_path = args.input_path.with_suffix(".dataset.json")
         else:
             # Default to a JSON file in the input directory
-            output = input_path / "dataset.json"
+            output_path = args.input_path / "dataset.json"
     else:
-        # Determine format from file extension
-        output_format = OutputFormat(Path(output).suffix.lstrip(".").lower())
+        output_path = args.output
+
+    # Determine format from file extension
+    output_format = OutputFormat(Path(output_path).suffix.lstrip(".").lower())
 
     # Ensure output path is absolute
-    output = Path(output).resolve()
-    console.print(f"Output will be saved to [bold blue]{output}[/]")
+    output_path = Path(output_path).resolve()
+    console.print(f"Output will be saved to [bold blue]{output_path}[/]")
 
-    # Initialize captioning model
-    with console.status("Loading captioning model...", spinner="dots"):
-        captioner = create_captioner(
-            captioner_type=captioner_type,
-            device=device,
-            use_8bit=use_8bit,
-            vlm_instruction=instruction,
-        )
-        console.print("[bold green]✓[/] Captioning model loaded successfully")
+    # Initialize captioning model with progress tracking
+    captioner = create_captioner_with_progress(
+        captioner_type=CaptionerType(args.captioner_type),
+        device=device,
+        use_8bit=args.use_8bit,
+        vlm_instruction=args.instruction,
+    )
 
     # Caption media files
-    caption_media(
-        input_path=input_path,
-        output_path=output,
-        captioner=captioner,
-        extensions=ext_list,
-        recursive=recursive,
-        fps=fps,
-        clean_caption=clean_caption,
-        output_format=output_format,
-        override=override,
-    )
+    try:
+        caption_media(
+            input_path=args.input_path,
+            output_path=output_path,
+            captioner=captioner,
+            extensions=args.extensions,
+            recursive=args.recursive,
+            fps=args.fps,
+            clean_caption=args.clean_caption,
+            output_format=output_format,
+            override=args.override,
+        )
+    except Exception as e:
+        parser.error(f"Error during captioning: {e}")
 
 
 if __name__ == "__main__":
-    app()
+    main()
